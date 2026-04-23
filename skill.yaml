@@ -1,0 +1,242 @@
+metadata:
+  name: video-pip
+  version: "1.0.0"
+  description: "Overlay a second video as a picture-in-picture inset on a main video — classic tutorial webcam overlay, reaction video, multi-cam. Configurable position, scale, and audio mixing."
+  author: Agentino
+  tags:
+    - video
+    - composition
+    - pip
+    - overlay
+    - ffmpeg
+    - marketplace
+  license: MIT
+  homepage: https://github.com/agentino/agentino
+
+spec:
+  input:
+    - name: main_video
+      type: string
+      description: "Absolute path to the main video (background layer)."
+      required: true
+    - name: inset_video
+      type: string
+      description: "Absolute path to the inset video (picture-in-picture layer)."
+      required: true
+    - name: output_path
+      type: string
+      description: "Destination MP4. Defaults to '<main>.pip.<ext>' next to the source."
+      required: false
+      default: ""
+    - name: position
+      type: string
+      description: "Where to place the inset: top-left | top-center | top-right | middle-left | middle-center | middle-right | bottom-left | bottom-center | bottom-right."
+      required: false
+      default: "bottom-right"
+    - name: scale
+      type: number
+      description: "Inset size as a fraction of the main video's width (0.1 = tiny, 0.25 = typical webcam, 0.5 = huge). Height scales proportionally."
+      required: false
+      default: 0.25
+    - name: margin
+      type: integer
+      description: "Distance in pixels from the nearest edge(s) implied by `position`."
+      required: false
+      default: 40
+    - name: audio_source
+      type: string
+      description: "Which track(s) to keep: 'main' (default) | 'inset' | 'mix' (amix both)."
+      required: false
+      default: "main"
+    - name: border_width
+      type: integer
+      description: "Border thickness around the inset, in pixels. 0 disables the border."
+      required: false
+      default: 0
+    - name: border_color
+      type: string
+      description: "Border colour. Named (`white`, `black`, `yellow`, …) or `#RRGGBB`. Only applied when border_width > 0."
+      required: false
+      default: "white"
+
+  output:
+    type: object
+    description: "Composition summary: output_path, main_duration_s, inset_duration_s, output_duration_s, position, scale, audio_source."
+
+  security:
+    sandbox_level: none
+    network_access: false
+    file_access: read-write
+
+  timeout_s: 900.0
+
+  executor:
+    type: python
+    code: |
+      import re
+      import shutil
+      import subprocess
+      from pathlib import Path
+
+      NAMED_COLOURS = {
+          "white": "white", "black": "black", "yellow": "yellow", "cyan": "cyan",
+          "red": "red", "green": "green", "blue": "blue", "gray": "gray", "grey": "gray",
+      }
+
+      # Each entry: (x_expression, y_expression) in terms of W,H (main) and w,h (overlay).
+      POSITIONS = {
+          "top-left":      ("{margin}",             "{margin}"),
+          "top-center":    ("(W-w)/2",              "{margin}"),
+          "top-right":     ("W-w-{margin}",         "{margin}"),
+          "middle-left":   ("{margin}",             "(H-h)/2"),
+          "middle-center": ("(W-w)/2",              "(H-h)/2"),
+          "middle-right":  ("W-w-{margin}",         "(H-h)/2"),
+          "bottom-left":   ("{margin}",             "H-h-{margin}"),
+          "bottom-center": ("(W-w)/2",              "H-h-{margin}"),
+          "bottom-right":  ("W-w-{margin}",         "H-h-{margin}"),
+      }
+
+      def _which(cmd):
+          p = shutil.which(cmd)
+          if not p:
+              raise RuntimeError(f"'{cmd}' not found on PATH. Install ffmpeg (brew/apt).")
+          return p
+
+      def _probe_duration(path):
+          ffprobe = _which("ffprobe")
+          r = subprocess.run(
+              [ffprobe, "-v", "error", "-show_entries", "format=duration",
+               "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+              check=True, capture_output=True, text=True, timeout=30,
+          )
+          return float(r.stdout.strip())
+
+      def _has_audio(path):
+          ffprobe = _which("ffprobe")
+          r = subprocess.run(
+              [ffprobe, "-v", "error", "-select_streams", "a",
+               "-show_entries", "stream=codec_type",
+               "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+              check=True, capture_output=True, text=True, timeout=30,
+          )
+          return "audio" in r.stdout
+
+      def _resolve_colour(c):
+          s = c.strip().lower()
+          if s in NAMED_COLOURS:
+              return NAMED_COLOURS[s]
+          if s.startswith("#") and re.fullmatch(r"#[0-9a-f]{6}", s):
+              return "0x" + s[1:].upper()
+          raise ValueError(f"Unknown colour '{c}'. Use a name or '#RRGGBB'.")
+
+      main_video = Path(str(input.get("main_video") or "")).expanduser().resolve()
+      if not main_video.is_file():
+          raise FileNotFoundError(f"main_video not found: {main_video}")
+
+      inset_video = Path(str(input.get("inset_video") or "")).expanduser().resolve()
+      if not inset_video.is_file():
+          raise FileNotFoundError(f"inset_video not found: {inset_video}")
+
+      requested_out = (input.get("output_path") or "").strip()
+      if requested_out:
+          output_path = Path(requested_out).expanduser().resolve()
+          output_path.parent.mkdir(parents=True, exist_ok=True)
+      else:
+          stem = main_video.stem
+          ext = main_video.suffix or ".mp4"
+          output_path = main_video.with_name(f"{stem}.pip{ext}")
+
+      position = (input.get("position") or "bottom-right").strip().lower()
+      if position not in POSITIONS:
+          raise ValueError(f"position must be one of {sorted(POSITIONS)} (got '{position}').")
+      scale = float(input.get("scale") or 0.25)
+      if not 0.05 <= scale <= 0.8:
+          raise ValueError(f"scale must be in [0.05, 0.8] (got {scale}).")
+      margin = max(0, int(input.get("margin") or 40))
+      audio_source = (input.get("audio_source") or "main").strip().lower()
+      if audio_source not in ("main", "inset", "mix"):
+          raise ValueError("audio_source must be 'main' | 'inset' | 'mix'.")
+      border_width = max(0, int(input.get("border_width") or 0))
+      border_colour = _resolve_colour(input.get("border_color") or "white")
+
+      main_dur = _probe_duration(main_video)
+      inset_dur = _probe_duration(inset_video)
+
+      # Build the filter graph.
+      inset_chain = [f"[1:v]scale=iw*{scale:.4f}:ih*{scale:.4f}:force_original_aspect_ratio=decrease"]
+      if border_width > 0:
+          inset_chain.append(
+              f"pad=iw+{2 * border_width}:ih+{2 * border_width}:{border_width}:{border_width}:color={border_colour}"
+          )
+      inset_chain.append("setsar=1[pip]")
+      inset_filter = ",".join(inset_chain[:-1]) + "," + inset_chain[-1] if len(inset_chain) > 1 else inset_chain[0]
+      # Re-join cleanly
+      inset_filter = "[1:v]" + ",".join(
+          [
+              f"scale=iw*{scale:.4f}:ih*{scale:.4f}:force_original_aspect_ratio=decrease",
+              *([f"pad=iw+{2 * border_width}:ih+{2 * border_width}:{border_width}:{border_width}:color={border_colour}"] if border_width > 0 else []),
+              "setsar=1",
+          ]
+      ) + "[pip]"
+
+      x_expr, y_expr = POSITIONS[position]
+      x_expr = x_expr.format(margin=margin)
+      y_expr = y_expr.format(margin=margin)
+
+      overlay = f"[0:v][pip]overlay=x={x_expr}:y={y_expr}:shortest=1[vout]"
+
+      filter_parts = [inset_filter, overlay]
+
+      # Audio routing.
+      main_has_audio = _has_audio(main_video)
+      inset_has_audio = _has_audio(inset_video)
+
+      audio_filter = None
+      audio_map = None
+      if audio_source == "main":
+          audio_map = "0:a" if main_has_audio else None
+      elif audio_source == "inset":
+          audio_map = "1:a" if inset_has_audio else None
+      else:  # mix
+          if main_has_audio and inset_has_audio:
+              audio_filter = "[0:a][1:a]amix=inputs=2:duration=shortest:dropout_transition=0[aout]"
+              audio_map = "[aout]"
+          elif main_has_audio:
+              audio_map = "0:a"
+          elif inset_has_audio:
+              audio_map = "1:a"
+      if audio_filter:
+          filter_parts.append(audio_filter)
+
+      filter_complex = ";".join(filter_parts)
+
+      ffmpeg = _which("ffmpeg")
+      cmd = [
+          ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+          "-i", str(main_video),
+          "-i", str(inset_video),
+          "-filter_complex", filter_complex,
+          "-map", "[vout]",
+      ]
+      if audio_map:
+          cmd += ["-map", audio_map, "-c:a", "aac", "-b:a", "192k"]
+      cmd += [
+          "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+          "-pix_fmt", "yuv420p",
+          "-movflags", "+faststart",
+          str(output_path),
+      ]
+      subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=1800)
+
+      out_dur = _probe_duration(output_path)
+
+      result = {
+          "output_path": str(output_path),
+          "main_duration_s": round(main_dur, 3),
+          "inset_duration_s": round(inset_dur, 3),
+          "output_duration_s": round(out_dur, 3),
+          "position": position,
+          "scale": scale,
+          "audio_source": audio_source,
+          "border_width": border_width,
+      }
