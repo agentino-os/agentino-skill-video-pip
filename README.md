@@ -14,7 +14,7 @@ Requires [Agentino](https://github.com/dagoSte/agentino) ≥ `1.2.0-rc.1` and `f
 brew install ffmpeg                                                    # macOS
 # sudo apt install ffmpeg                                              # Debian / Ubuntu
 
-agentino marketplace install dagoSte/agentino-skill-video-pip
+agentino marketplace install agentino-os/agentino-skill-video-pip
 agentino skill show video-pip
 ```
 
